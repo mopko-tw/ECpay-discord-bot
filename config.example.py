@@ -64,4 +64,4 @@ LOG_CONFIG = {
 }
 
 # 版本資訊
-BOT_VERSION = "1.4.0" 
+BOT_VERSION = "1.5.0" 
