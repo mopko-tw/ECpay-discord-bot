@@ -1,0 +1,246 @@
+# ECPay Discord Bot - CI/CD Pipeline
+# 自動化建置、測試和程式碼品質檢查
+
+name: ECPay Discord Bot CI
+
+on:
+  push:
+    branches: [ "main", "develop" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  # 程式碼品質檢查
+  code-quality:
+    runs-on: ubuntu-latest
+    name: Code Quality Check
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+        
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+          
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install flake8 black isort bandit safety
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        
+    - name: Code formatting check with Black
+      run: |
+        black --check --diff .
+        
+    - name: Import sorting check with isort
+      run: |
+        isort --check-only --diff .
+        
+    - name: Lint with flake8
+      run: |
+        # 停止建置如果有Python語法錯誤或未定義的名稱
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        # 將所有錯誤視為警告，GitHub編輯器寬度為127字元
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+        
+    - name: Security check with Bandit
+      run: |
+        bandit -r . -f json -o bandit-report.json || true
+        bandit -r . -f txt
+        
+    - name: Dependency security check
+      run: |
+        safety check --json --output safety-report.json || true
+        safety check
+
+  # 多版本Python測試
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.8", "3.9", "3.10", "3.11"]
+        
+    name: Test Python ${{ matrix.python-version }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-${{ matrix.python-version }}-
+          ${{ runner.os }}-pip-
+          
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pytest pytest-cov pytest-asyncio
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        
+    - name: Create test config
+      run: |
+        cp config.example.py config.py
+        
+    - name: Test import modules
+      run: |
+        python -c "import main; print('✅ main.py 導入成功')"
+        python -c "import ecpay_handler; print('✅ ecpay_handler.py 導入成功')"
+        python -c "from commands import payment_commands; print('✅ payment_commands.py 導入成功')"
+        
+    - name: Run syntax check
+      run: |
+        python -m py_compile main.py
+        python -m py_compile ecpay_handler.py
+        python -m py_compile commands/payment_commands.py
+        echo "✅ 所有Python檔案語法檢查通過"
+        
+    - name: Test ECPay handler
+      run: |
+        python -c "
+        from ecpay_handler import ECPayHandler
+        handler = ECPayHandler()
+        print('✅ ECPay處理器初始化成功')
+        print('支援的付款方式:', list(handler.payment_methods.keys()))
+        "
+
+  # Discord Bot特定檢查
+  discord-bot-check:
+    runs-on: ubuntu-latest
+    name: Discord Bot Validation
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        
+    - name: Check Discord.py version compatibility
+      run: |
+        python -c "
+        import discord
+        print(f'Discord.py 版本: {discord.__version__}')
+        if discord.version_info.major >= 2:
+            print('✅ Discord.py v2+ 兼容')
+        else:
+            print('❌ 需要Discord.py v2+')
+            exit(1)
+        "
+        
+    - name: Validate bot commands structure
+      run: |
+        python -c "
+        import sys
+        sys.path.append('.')
+        from commands.payment_commands import PaymentCommands
+        print('✅ 指令模塊結構驗證通過')
+        "
+        
+    - name: Check configuration files
+      run: |
+        if [ ! -f config.example.py ]; then
+          echo '❌ config.example.py 不存在'
+          exit 1
+        fi
+        
+        python -c "
+        import config
+        required_vars = ['BOT_VERSION', 'ECPAY_CONFIG', 'LOG_CONFIG']
+        for var in required_vars:
+            if not hasattr(config, var):
+                print(f'❌ 缺少必要配置: {var}')
+                exit(1)
+        print('✅ 配置檔案驗證通過')
+        "
+
+  # 文件檢查
+  documentation-check:
+    runs-on: ubuntu-latest
+    name: Documentation Check
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check README files
+      run: |
+        if [ ! -f README.md ]; then
+          echo '❌ README.md 不存在'
+          exit 1
+        fi
+        
+        if [ ! -d readme ]; then
+          echo '❌ readme 資料夾不存在'
+          exit 1
+        fi
+        
+        echo '✅ 文件結構檢查通過'
+        
+    - name: Check version consistency
+      run: |
+        VERSION=$(python -c "from config import BOT_VERSION; print(BOT_VERSION)")
+        echo "檢測到版本: $VERSION"
+        
+        if [ -f "readme/README_v${VERSION}.md" ]; then
+          echo "✅ 版本化README存在: README_v${VERSION}.md"
+        else
+          echo "❌ 缺少版本化README: README_v${VERSION}.md"
+          exit 1
+        fi
+
+  # 建置摘要
+  build-summary:
+    runs-on: ubuntu-latest
+    needs: [code-quality, test, discord-bot-check, documentation-check]
+    name: Build Summary
+    if: always()
+    
+    steps:
+    - name: Build Summary
+      run: |
+        echo "🎉 ECPay Discord Bot CI/CD 完成"
+        echo "📊 建置結果摘要:"
+        echo "- 程式碼品質檢查: ${{ needs.code-quality.result }}"
+        echo "- 多版本測試: ${{ needs.test.result }}"
+        echo "- Discord Bot檢查: ${{ needs.discord-bot-check.result }}"
+        echo "- 文件檢查: ${{ needs.documentation-check.result }}"
+        
+        if [ "${{ needs.code-quality.result }}" = "success" ] && \
+           [ "${{ needs.test.result }}" = "success" ] && \
+           [ "${{ needs.discord-bot-check.result }}" = "success" ] && \
+           [ "${{ needs.documentation-check.result }}" = "success" ]; then
+          echo "✅ 所有檢查通過，可以安全部署！"
+        else
+          echo "❌ 部分檢查失敗，請檢查上述結果"
+          exit 1
+        fi
